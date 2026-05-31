@@ -7,6 +7,10 @@ import binascii
 import struct
 import re
 
+# 统一以 UTF-8 输出，避免在中文 Windows 控制台/管道下 emoji 触发 GBK 编码错误
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 
 def extract_lsb_from_image(img_path, method="all_channels"):
     """

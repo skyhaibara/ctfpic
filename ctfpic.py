@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import subprocess
 import json
 from PIL import Image, ImageFile, ExifTags
@@ -9,12 +10,29 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QTextEdit, QGroupBox, QMessageBox, QComboBox,
                              QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
                              QShortcut, QMenu, QAbstractItemView)
-from PyQt5.QtCore import Qt, QSize, pyqtSignal, QThread, QTimer
+from PyQt5.QtCore import (Qt, QSize, pyqtSignal, QThread, QTimer,
+                          qInstallMessageHandler, QtMsgType)
 from PyQt5.QtGui import (QPixmap, QFont, QIcon, QPalette, QColor,
                          QTextCharFormat, QTextCursor, QBrush, QKeySequence)
 
 # 确保可以加载各种格式的图片
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+# 以脚本所在目录为基准，避免依赖当前工作目录
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPTS_DIR = os.path.join(BASE_DIR, "scripts")
+ICON_PATH = os.path.join(BASE_DIR, "icon.png")
+
+# 常见 flag 格式：xxx{...}，如 flag{...}、ctf{...}、picoCTF{...}
+FLAG_REGEX = re.compile(r'[A-Za-z0-9_]{1,32}\{[^{}\n]{1,256}\}')
+# 可能直接包含 flag / 备注的 EXIF 字段
+COMMENT_TAGS = ("UserComment", "XPComment", "ImageDescription", "XPTitle",
+                "XPSubject", "XPKeywords", "Artist", "Copyright", "Software")
+
+
+def find_flags(text):
+    """从文本中提取形如 xxx{...} 的 flag，保持出现顺序去重"""
+    return list(dict.fromkeys(FLAG_REGEX.findall(text)))
 
 
 class ScriptExecutor(QThread):
@@ -22,24 +40,28 @@ class ScriptExecutor(QThread):
     output_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(str)
 
-    def __init__(self, script_path, image_path):
+    def __init__(self, script_path, image_path, output_dir):
         super().__init__()
         self.script_path = script_path
         self.image_path = image_path
+        self.output_dir = output_dir
 
     def run(self):
         try:
-            # 执行脚本
+            # 以 output_dir 作为工作目录执行，脚本产生的文件会落在该目录下
             result = subprocess.run(
                 [sys.executable, self.script_path, self.image_path],
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
-                timeout=30
+                errors='replace',  # 避免子进程输出非 UTF-8 字节时解码失败导致错误信息丢失
+                timeout=30,
+                cwd=self.output_dir
             )
 
             output_text = f"脚本: {os.path.basename(self.script_path)}\n"
-            output_text += f"命令行: {sys.executable} {os.path.basename(self.script_path)} {os.path.basename(self.image_path)}\n\n"
+            output_text += f"命令行: {sys.executable} {os.path.basename(self.script_path)} {os.path.basename(self.image_path)}\n"
+            output_text += f"输出目录: {self.output_dir}\n\n"
 
             if result.stdout:
                 output_text += f"输出:\n{result.stdout}\n"
@@ -73,72 +95,137 @@ class PhotoAnalyzerApp(QMainWindow):
         self.setup_clipboard_functionality()
         self.exif_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.exif_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.comment_preview = QTextEdit()
-        self.comment_preview.setReadOnly(True)
-        self.comment_preview.setPlaceholderText("EXIF 备注 / Flag 将在这里集中显示")
+        self.found_flags = set()  # 当前图片已发现的 flag（EXIF + 脚本输出）
 
     def init_ui(self):
         """初始化用户界面"""
         self.setWindowTitle("CTF-PIC")
         self.setGeometry(100, 100, 1000, 800)
 
-        if os.path.exists("icon.png"):
-            self.setWindowIcon(QIcon("icon.png"))
+        if os.path.exists(ICON_PATH):
+            self.setWindowIcon(QIcon(ICON_PATH))
 
-        # 设置应用样式
+        # 设置应用样式（现代深色主题）
         self.setStyleSheet("""
-            QMainWindow {
-                background-color: #f0f0f0;
+            QMainWindow, QWidget {
+                background-color: #1e2127;
+                color: #d7dae0;
             }
             QGroupBox {
                 font-weight: bold;
-                border: 2px solid #cccccc;
-                border-radius: 5px;
-                margin-top: 10px;
-                padding-top: 10px;
+                color: #d7dae0;
+                border: 1px solid #3a3f4b;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding: 12px 10px 10px 10px;
+                background-color: #282c34;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
+                left: 12px;
+                padding: 0 6px;
+                color: #8ab4f8;
             }
             QPushButton {
                 background-color: #4a86e8;
                 color: white;
                 border: none;
-                border-radius: 4px;
+                border-radius: 6px;
                 padding: 8px 16px;
                 font-weight: bold;
             }
             QPushButton:hover {
+                background-color: #5a96f8;
+            }
+            QPushButton:pressed {
                 background-color: #3a76d8;
             }
             QPushButton:disabled {
-                background-color: #a0a0a0;
+                background-color: #3a3f4b;
+                color: #777e8a;
             }
             QLabel {
-                color: #333333;
+                color: #d7dae0;
             }
             QTextEdit {
-                background-color: white;
-                border: 1px solid #cccccc;
-                border-radius: 4px;
-                padding: 5px;
+                background-color: #16181d;
+                color: #d7dae0;
+                border: 1px solid #3a3f4b;
+                border-radius: 6px;
+                padding: 6px;
+                selection-background-color: #4a86e8;
                 font-family: "Consolas", "Monaco", monospace;
             }
             QTableWidget {
-                background-color: white;
-                border: 1px solid #cccccc;
-                border-radius: 4px;
-                gridline-color: #e0e0e0;
+                background-color: #16181d;
+                color: #d7dae0;
+                border: 1px solid #3a3f4b;
+                border-radius: 6px;
+                gridline-color: #2b2f3a;
+                selection-background-color: #4a86e8;
+                selection-color: white;
             }
             QTableWidget::item {
                 padding: 5px;
             }
             QHeaderView::section {
-                background-color: #f0f0f0;
-                padding: 5px;
-                border: 1px solid #e0e0e0;
+                background-color: #2b2f3a;
+                color: #b9c0cc;
+                padding: 6px;
+                border: none;
+                border-right: 1px solid #1e2127;
+            }
+            QTabWidget::pane {
+                border: 1px solid #3a3f4b;
+                border-radius: 8px;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background-color: #282c34;
+                color: #9aa0aa;
+                padding: 8px 18px;
+                border: 1px solid #3a3f4b;
+                border-bottom: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #4a86e8;
+                color: white;
+            }
+            QComboBox {
+                background-color: #16181d;
+                color: #d7dae0;
+                border: 1px solid #3a3f4b;
+                border-radius: 6px;
+                padding: 6px 10px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #282c34;
+                color: #d7dae0;
+                selection-background-color: #4a86e8;
+                border: 1px solid #3a3f4b;
+            }
+            QStatusBar {
+                background-color: #16181d;
+                color: #9aa0aa;
+            }
+            QScrollBar:vertical {
+                background: #1e2127;
+                width: 12px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #3a3f4b;
+                border-radius: 6px;
+                min-height: 24px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #4a86e8;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
             }
         """)
 
@@ -149,7 +236,7 @@ class PhotoAnalyzerApp(QMainWindow):
         title_label = QLabel("📸 CTF-PIC")
         title_label.setFont(QFont("Arial", 20, QFont.Bold))
         title_label.setAlignment(Qt.AlignCenter)
-        title_label.setStyleSheet("color: #2c3e50; margin: 10px; padding: 10px;")
+        title_label.setStyleSheet("color: #8ab4f8; margin: 10px; padding: 10px;")
         main_layout.addWidget(title_label)
 
         self.tab_widget = QTabWidget()
@@ -276,41 +363,23 @@ class PhotoAnalyzerApp(QMainWindow):
         try:
             self.status_bar.showMessage(message, 3000)
 
-            original_style = """
-                QPushButton {
-                    background-color: #4a86e8;
-                    color: white;
-                    border: none;
-                    border-radius: 4px;
-                    padding: 8px 16px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #3a76d8;
-                }
-                QPushButton:disabled {
-                    background-color: #a0a0a0;
-                }
-            """
-
             feedback_style = """
                 QPushButton {
                     background-color: #4CAF50;
                     color: white;
                     border: none;
-                    border-radius: 4px;
+                    border-radius: 6px;
                     padding: 8px 16px;
                     font-weight: bold;
                 }
             """
 
-            if hasattr(self, 'copy_selected_button') and self.copy_selected_button.isEnabled():
-                self.copy_selected_button.setStyleSheet(feedback_style)
-                QTimer.singleShot(500, lambda: self.copy_selected_button.setStyleSheet(original_style))
-
-            if hasattr(self, 'copy_all_button') and self.copy_all_button.isEnabled():
-                self.copy_all_button.setStyleSheet(feedback_style)
-                QTimer.singleShot(500, lambda: self.copy_all_button.setStyleSheet(original_style))
+            # 短暂变绿提示，之后清空局部样式以回退到全局主题
+            for btn_name in ('copy_selected_button', 'copy_all_button'):
+                btn = getattr(self, btn_name, None)
+                if btn is not None and btn.isEnabled():
+                    btn.setStyleSheet(feedback_style)
+                    QTimer.singleShot(500, lambda b=btn: b.setStyleSheet(""))
         except Exception as e:
             print(f"显示复制反馈时出错: {str(e)}")
 
@@ -332,12 +401,12 @@ class PhotoAnalyzerApp(QMainWindow):
         self.image_info_label.setWordWrap(True)
         self.image_info_label.setStyleSheet("""
             QLabel {
-                color: #666666;
+                color: #9aa0aa;
                 font-style: italic;
                 padding: 10px;
-                border: 2px dashed #cccccc;
-                border-radius: 5px;
-                background-color: #f9f9f9;
+                border: 2px dashed #3a3f4b;
+                border-radius: 6px;
+                background-color: #16181d;
             }
         """)
         upload_layout.addWidget(self.image_info_label)
@@ -361,10 +430,10 @@ class PhotoAnalyzerApp(QMainWindow):
         self.image_preview_label.setMinimumHeight(300)
         self.image_preview_label.setStyleSheet("""
             QLabel {
-                background-color: #f8f8f8;
-                border: 2px dashed #cccccc;
+                background-color: #16181d;
+                border: 2px dashed #3a3f4b;
                 border-radius: 8px;
-                color: #888888;
+                color: #777e8a;
                 font-style: italic;
                 padding: 20px;
             }
@@ -402,6 +471,16 @@ class PhotoAnalyzerApp(QMainWindow):
 
         # 添加复制按钮区域
         exif_button_layout = QHBoxLayout()
+        self.copy_selected_button = QPushButton("📋 复制选中")
+        self.copy_selected_button.clicked.connect(self.copy_selected_exif)
+        self.copy_selected_button.setEnabled(False)
+        exif_button_layout.addWidget(self.copy_selected_button)
+
+        self.copy_all_button = QPushButton("📋 复制全部")
+        self.copy_all_button.clicked.connect(self.copy_all_exif)
+        self.copy_all_button.setEnabled(False)
+        exif_button_layout.addWidget(self.copy_all_button)
+
         self.save_exif_button = QPushButton("💾 保存为文件")
         self.save_exif_button.clicked.connect(self.save_exif_info)
         self.save_exif_button.setEnabled(False)
@@ -412,6 +491,19 @@ class PhotoAnalyzerApp(QMainWindow):
         analysis_layout.addWidget(exif_widget, 1)
         analysis_group.setLayout(analysis_layout)
         layout.addWidget(analysis_group)
+
+        # 备注 / Flag 集中显示区域
+        flag_group = QGroupBox("🚩 备注 / Flag")
+        flag_layout = QVBoxLayout()
+        self.comment_preview = QTextEdit()
+        self.comment_preview.setReadOnly(True)
+        self.comment_preview.setMaximumHeight(140)
+        self.comment_preview.setPlaceholderText(
+            "EXIF 备注字段与脚本输出中检测到的 flag{...} 将在这里集中高亮显示")
+        flag_layout.addWidget(self.comment_preview)
+        flag_group.setLayout(flag_layout)
+        layout.addWidget(flag_group)
+
         self.tab_widget.addTab(analysis_tab, "照片分析")
 
     def create_script_tab(self):
@@ -436,9 +528,10 @@ class PhotoAnalyzerApp(QMainWindow):
         self.script_info_label.setStyleSheet("""
             QLabel {
                 padding: 10px;
-                border: 1px solid #e0e0e0;
-                border-radius: 5px;
-                background-color: #f9f9f9;
+                border: 1px solid #3a3f4b;
+                border-radius: 6px;
+                background-color: #16181d;
+                color: #b9c0cc;
             }
         """)
         script_layout.addWidget(self.script_info_label)
@@ -448,9 +541,15 @@ class PhotoAnalyzerApp(QMainWindow):
         self.execute_button.setEnabled(False)
         script_layout.addWidget(self.execute_button)
 
+        output_header_layout = QHBoxLayout()
         script_output_label = QLabel("脚本输出:")
         script_output_label.setFont(QFont("Arial", 10, QFont.Bold))
-        script_layout.addWidget(script_output_label)
+        output_header_layout.addWidget(script_output_label)
+        output_header_layout.addStretch(1)
+        self.clear_output_button = QPushButton("🗑 清空输出")
+        self.clear_output_button.clicked.connect(lambda: self.script_output_text.clear())
+        output_header_layout.addWidget(self.clear_output_button)
+        script_layout.addLayout(output_header_layout)
 
         self.script_output_text = QTextEdit()
         self.script_output_text.setReadOnly(True)
@@ -462,7 +561,7 @@ class PhotoAnalyzerApp(QMainWindow):
 
     def load_scripts(self):
         """加载scripts文件夹中的Python脚本"""
-        scripts_dir = "scripts"
+        scripts_dir = SCRIPTS_DIR
         if not os.path.exists(scripts_dir):
             os.makedirs(scripts_dir, exist_ok=True)
             self.status_bar.showMessage("scripts文件夹已创建，请添加Python脚本")
@@ -486,7 +585,7 @@ class PhotoAnalyzerApp(QMainWindow):
         """脚本被选中时的处理"""
         if index > 0:
             script_name = self.script_combo.currentText()
-            script_path = os.path.join("scripts", script_name)
+            script_path = os.path.join(SCRIPTS_DIR, script_name)
 
             if os.path.exists(script_path):
                 try:
@@ -548,12 +647,12 @@ class PhotoAnalyzerApp(QMainWindow):
                 self.image_info_label.setText(f"✅ 已选择: {file_name}\n📁 路径: {image_path}")
                 self.image_info_label.setStyleSheet("""
                     QLabel {
-                        color: #27ae60;
+                        color: #5cd47a;
                         font-weight: bold;
                         padding: 10px;
-                        border: 2px solid #27ae60;
-                        border-radius: 5px;
-                        background-color: #f0f9f0;
+                        border: 1px solid #2e7d46;
+                        border-radius: 6px;
+                        background-color: #16241a;
                     }
                 """)
 
@@ -584,6 +683,8 @@ class PhotoAnalyzerApp(QMainWindow):
                 self.display_exif_info(img)
                 self.execute_button.setEnabled(True)
                 self.save_exif_button.setEnabled(True)
+                self.copy_selected_button.setEnabled(True)
+                self.copy_all_button.setEnabled(True)
                 self.status_bar.showMessage(f"已加载图片: {file_name}")
 
         except Exception as e:
@@ -594,11 +695,13 @@ class PhotoAnalyzerApp(QMainWindow):
         exif_data = img._getexif()
         self.exif_table.clearContents()
         self.current_exif_data.clear()
+        self.found_flags.clear()  # 切换图片时重置已发现的 flag
 
         if not exif_data:
             self.exif_table.setRowCount(1)
             self.exif_table.setItem(0, 0, QTableWidgetItem("无EXIF信息"))
             self.exif_table.setItem(0, 1, QTableWidgetItem(""))
+            self.update_flag_panel()
             return
 
         exif_items = []
@@ -627,18 +730,64 @@ class PhotoAnalyzerApp(QMainWindow):
                     # 保留原始 bytes
                     value = repr(value)
 
-            exif_items.append((tag_name, str(value)))
+            value = str(value)
+            exif_items.append((tag_name, value))
+            self.current_exif_data[tag_name] = value
 
         if not exif_items:
             self.exif_table.setRowCount(1)
             self.exif_table.setItem(0, 0, QTableWidgetItem("无可显示EXIF信息"))
             self.exif_table.setItem(0, 1, QTableWidgetItem(""))
+            self.update_flag_panel()
             return
 
         self.exif_table.setRowCount(len(exif_items))
         for row, (k, v) in enumerate(sorted(exif_items)):
             self.exif_table.setItem(row, 0, QTableWidgetItem(k))
             self.exif_table.setItem(row, 1, QTableWidgetItem(v))
+
+        self.update_flag_panel()
+
+    def update_flag_panel(self):
+        """扫描当前 EXIF 数据中的 flag 并刷新备注/Flag 面板"""
+        all_text = "\n".join(f"{k}: {v}" for k, v in self.current_exif_data.items())
+        self.found_flags.update(find_flags(all_text))
+        self.render_flag_panel()
+
+    def scan_text_for_flags(self, text):
+        """扫描任意文本（如脚本输出）中的 flag，发现新内容则刷新面板"""
+        new_flags = find_flags(text)
+        if new_flags:
+            self.found_flags.update(new_flags)
+            self.render_flag_panel()
+
+    def render_flag_panel(self):
+        """根据 found_flags 与 EXIF 备注字段渲染面板（HTML 高亮）"""
+        def esc(s):
+            return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+        parts = []
+        if self.found_flags:
+            parts.append('<div style="color:#ff6b6b;font-weight:bold;">🚩 发现 Flag:</div>')
+            for flag in self.found_flags:
+                parts.append(
+                    '<div style="color:#ff6b6b;font-weight:bold;'
+                    f'font-family:Consolas,monospace;">&nbsp;&nbsp;{esc(flag)}</div>')
+
+        comment_lines = [(tag, self.current_exif_data[tag].strip())
+                         for tag in COMMENT_TAGS
+                         if self.current_exif_data.get(tag, "").strip()]
+        if comment_lines:
+            parts.append('<div style="margin-top:6px;color:#8ab4f8;'
+                         'font-weight:bold;">📝 备注字段:</div>')
+            for tag, val in comment_lines:
+                parts.append(f'<div style="color:#d7dae0;">'
+                             f'<span style="color:#9aa0aa;">{tag}:</span> {esc(val)}</div>')
+
+        if parts:
+            self.comment_preview.setHtml("".join(parts))
+        else:
+            self.comment_preview.clear()
 
     def save_exif_info(self):
         """保存EXIF信息到文件"""
@@ -703,16 +852,22 @@ class PhotoAnalyzerApp(QMainWindow):
             QMessageBox.warning(self, "警告", "请选择一个脚本")
             return
 
-        script_path = os.path.join("scripts", selected_script)
+        script_path = os.path.join(SCRIPTS_DIR, selected_script)
         if not os.path.exists(script_path):
             QMessageBox.critical(self, "错误", f"脚本不存在: {script_path}")
             return
 
-        self.script_output_text.clear()
+        # 每个脚本的输出归类到 output/<脚本名>/ 下
+        output_dir = os.path.join(BASE_DIR, "output", os.path.splitext(selected_script)[0])
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 不再自动清空历史输出；多次执行结果累积保留，需要时用「清空输出」按钮手动清除
+        if self.script_output_text.toPlainText().strip():
+            self.script_output_text.append("\n" + "=" * 70 + "\n")
         self.execute_button.setEnabled(False)
         self.execute_button.setText("执行中...")
 
-        self.script_executor = ScriptExecutor(script_path, self.current_image_path)
+        self.script_executor = ScriptExecutor(script_path, self.current_image_path, output_dir)
         self.script_executor.output_signal.connect(self.on_script_output)
         self.script_executor.finished_signal.connect(self.on_script_finished)
         self.script_executor.start()
@@ -722,6 +877,7 @@ class PhotoAnalyzerApp(QMainWindow):
     def on_script_output(self, output):
         """处理脚本输出"""
         self.script_output_text.append(output)
+        self.scan_text_for_flags(output)
 
     def on_script_finished(self, message):
         """脚本执行完成"""
@@ -733,14 +889,30 @@ class PhotoAnalyzerApp(QMainWindow):
         self.script_output_text.setTextCursor(cursor)
 
 
+def _qt_message_handler(mode, context, message):
+    """过滤 Windows 上 emoji/CJK 渲染时 HarfBuzz 产生的无害告警，其余照常输出"""
+    if "OpenType support missing" in message:
+        return
+    sys.stderr.write(message + "\n")
+
+
 def main():
+    qInstallMessageHandler(_qt_message_handler)
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    # 指定带 CJK 字形的默认字体，减少字体回退并保证中文显示清晰
+    default_font = QFont("Microsoft YaHei UI", 9)
+    default_font.setStyleStrategy(QFont.PreferAntialias)
+    app.setFont(default_font)
 
-    app_icon = QIcon.fromTheme("camera-photo")
-    if app_icon.isNull():
-        app_icon = app.style().standardIcon(app.style().SP_DesktopIcon)
-    app.setWindowIcon(app_icon)
+    if os.path.exists(ICON_PATH):
+        app.setWindowIcon(QIcon(ICON_PATH))
+    else:
+        app_icon = QIcon.fromTheme("camera-photo")
+        if app_icon.isNull():
+            app_icon = app.style().standardIcon(app.style().SP_DesktopIcon)
+        app.setWindowIcon(app_icon)
 
     window = PhotoAnalyzerApp()
     window.show()

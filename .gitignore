@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# 脚本运行产物
+output/
+*_exif.json
+extracted_from_*.zip
+appended_from_*.bin
+hidden_from_*.bin
+lsb_data_*.txt
+*_enhanced.png
+*_bit*.png
+*_LSB_combined.png
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

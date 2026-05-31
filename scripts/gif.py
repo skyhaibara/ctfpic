@@ -5,6 +5,10 @@ import struct
 import os
 from pathlib import Path
 
+# 统一以 UTF-8 输出，避免在中文 Windows 控制台/管道下 emoji 触发 GBK 编码错误
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 
 def extract_apng_delay_info(image_path):
     """分析APNG图片的帧延时信息"""

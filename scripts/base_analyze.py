@@ -14,13 +14,14 @@ def analyze_ctf_image(image_path):
         result += f"图片模式: {img.mode}\n"
         result += f"图片格式: {img.format}\n"
 
-        # 检查可能的LSB隐写
-        pixels = list(img.getdata())
-        if len(pixels) > 0:
-            # 提取LSB
+        # 检查可能的LSB隐写（取前100像素）
+        rgb = img.convert('RGB')
+        w, h = rgb.size
+        count = min(100, w * h)
+        if count > 0:
             lsb_string = ""
-            for i in range(min(100, len(pixels))):
-                r, g, b = pixels[i][:3]
+            for i in range(count):
+                r, g, b = rgb.getpixel((i % w, i // w))
                 lsb_string += str(r & 1) + str(g & 1) + str(b & 1)
 
             result += f"前100像素LSB: {lsb_string[:30]}...\n"
